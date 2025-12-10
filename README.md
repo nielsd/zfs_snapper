@@ -28,6 +28,14 @@ This single bash script creates and maintains snapshots of single or all zfs zpo
 - Root privileges (or a user with proper ZFS permissions)
 - A dedicated backup pool named `backup` (you can change the name in the script)
 
+## Configuration
+```bash
+SNAP_PREFIX="snapper"                 # prefix for all snapshots
+BACKUP_POOL="backup"                  # destination pool
+DAILY_RETENTION_DAYS=5
+WEEKLY_RETENTION_DAYS=14
+```
+
 ## Quick Start
 
 ```bash
@@ -44,3 +52,15 @@ sudo /root/sbin/zfs_snapper --all --doit --verbose
 
 # Optional: weekly only on Sunday (extra safety)
 0 3 * * 0 /root/sbin/zfs_snapper --all --doit --list-all
+```
+
+## Option,Description
+```
+--doit, Actually delete old snapshots (default = dry-run) send-backups,Replicate latest snapshot to backup/<pool>
+--verbose, Show detailed progress
+--quiet or -q, Silent mode – perfect for cron
+--list-new, Show only snapshots created this run
+--list-all, Show all snapper_* snapshots
+--all, Process all pools or (default if none specified) tank rpool ...,Process only the listed pools
+--help, Show help
+```
