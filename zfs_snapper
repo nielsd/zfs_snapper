@@ -1,0 +1,96 @@
+#!/bin/bash
+set -euo pipefail
+
+SNAP_PREFIX="snapper"
+BACKUP_POOL="backup"
+DAILY_RETENTION_DAYS=1
+WEEKLY_RETENTION_DAYS=14
+
+DRY_RUN=true
+VERBOSE=false
+LIST_NEW=false
+LIST_ALL=false
+QUIET=false
+ZPOOLS=()
+NEW_SNAPS=()
+
+show_help() { cat << EOF
+ZFS Snapper – TrueNAS-style Snapshot + Replication Manager
+Usage: ${0##*/} [OPTIONS] [zpool ...|--all]
+  --doit            Actually delete
+  --send-backups    Replicate to $BACKUP_POOL
+  --verbose, --list-new, --list-all, --quiet, --all, -h
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) show_help; exit 0 ;;
+        --doit) DRY_RUN=false; shift ;;
+        --verbose) VERBOSE=true; shift ;;
+        --list-new) LIST_NEW=true; shift ;;
+        --list-all) LIST_ALL=true; shift ;;
+        --quiet|-q) QUIET=true; shift ;;
+        --all) ZPOOLS=($(zpool list -H -o name)); shift ;;
+        -*) echo "Unknown option: $1" >&2; exit 1 ;;
+        *) ZPOOLS+=("$1"); shift ;;
+    esac
+done
+[[ ${#ZPOOLS[@]} -eq 0 ]] && ZPOOLS=($(zpool list -H -o name))
+
+timestamp=$(date +"%Y-%m-%d_%H:%M:%S")
+
+log() { [[ $QUIET == false ]] && echo "$@"; }
+verbose_log() { [[ $VERBOSE == true ]] && echo "[VERBOSE] $@"; }
+error() { echo "ERROR: $@" >&2; }
+
+create_snapshot() {
+    local type="$1" zpool="$2"
+    local snap_name="${SNAP_PREFIX}_${type}_${timestamp}"
+    local full="${zpool}@${snap_name}"
+
+    if zfs list -H "$full" >/dev/null 2>&1; then
+        verbose_log "Snapshot $full already exists"
+        return 0
+    fi
+
+    log "Creating recursive $type snapshot @$snap_name"
+    zfs snapshot -r "$full" && NEW_SNAPS+=("$full") && log "Created @$snap_name"
+}
+
+
+prune_snapshots() {
+    local snap_type=$1 retention_days=$2 zpool=$3
+    local now_ts=$(( $(date +%s) - retention_days * 86400 ))
+
+    # ONLY prune ROOT recursive snapshots (zpool@snapper_*)
+    zfs list -H -p -t snapshot -o name,creation "$zpool" 2>/dev/null \
+        | grep "@${SNAP_PREFIX}_${snap_type}_" \
+        | while IFS=$'\t' read -r snap ts; do
+            [[ $ts -lt $now_ts ]] || continue
+            log "Pruning $snap_type: $snap"
+            [[ $DRY_RUN == true ]] && {
+                log "  [DRY RUN] zfs destroy -r $snap"
+                continue
+            }
+            zfs destroy -r "$snap" 2>/dev/null || true
+        done
+}
+
+list_snapshots() {
+    [[ $LIST_NEW == true && ${#NEW_SNAPS[@]} -gt 0 ]] && { echo "=== New this run ==="; printf '%s\n' "${NEW_SNAPS[@]}"; echo; }
+    [[ $LIST_ALL == true ]] && { echo "=== All snapper snapshots ==="; zfs list -o name,creation -t snapshot | grep "@${SNAP_PREFIX}_" | sort; echo; }
+}
+
+main() {
+    for zpool in "${ZPOOLS[@]}"; do
+        [[ $QUIET == false ]] && echo "=== Processing zpool: $zpool ==="
+        [[ $(date +%w) == 0 ]] && { create_snapshot "weekly" "$zpool"; prune_snapshots "weekly" "$WEEKLY_RETENTION_DAYS" "$zpool"; }
+        create_snapshot "daily" "$zpool"
+        prune_snapshots "daily" "$DAILY_RETENTION_DAYS" "$zpool"
+        [[ $QUIET == false ]] && echo
+    done
+    list_snapshots
+}
+
+main
