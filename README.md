@@ -5,6 +5,7 @@
 
 This single bash script creates and maintains snapshots of single or all zfs zpools recurively (datasets as zvols) and held snapshots for a number of days (default 5) and a number of weeks (default 2).
 
+
 [![bash](https://img.shields.io/badge/language-bash-brightgreen.svg)](https://www.gnu.org/software/bash/)
 [![ZFS](https://img.shields.io/badge/ZFS-on--Linux%20%7C%20FreeBSD%20%7C%20TrueNAS-blue.svg)](https://openzfs.github.io/openzfs-docs/)
 
@@ -14,6 +15,7 @@ This single bash script creates and maintains snapshots of single or all zfs zpo
   → `tank@snapper_daily_2025-12-08_14:27:39`, `tank/home@…`, `tank/lxd1/root@…`, etc.
 - Daily + weekly snapshots (weekly on Sundays)
 - Automatic pruning with configurable retention
+- could be combined with simple syncoid call to sync snapshots to backup pools
 - TrueNAS-style **incremental replication** to a local backup pool (`backup/tank`, `backup/rpool`, …)
 - Backup datasets are automatically set `readonly=on`
 - Same retention policy applied on the backup side
