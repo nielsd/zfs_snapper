@@ -1,39 +1,62 @@
 #!/bin/bash
+# zfs_snapper – Perfect independent control over snapshot creation & pruning
+#   --dosnap     → really create snapshots
+#   --doprune    → really delete old snapshots
+#   (both default to dry-run if not given)
+
 set -euo pipefail
 
 SNAP_PREFIX="snapper"
-BACKUP_POOL="backup"
-DAILY_RETENTION_DAYS=1
-WEEKLY_RETENTION_DAYS=14
+DAILY_RETENTION_DAYS=3
+WEEKLY_RETENTION_DAYS=7
 
-DRY_RUN=true
+DO_SNAP=false      # --dosnap enables this
+DO_PRUNE=false     # --do-prune enables this
 VERBOSE=false
 LIST_NEW=false
 LIST_ALL=false
 QUIET=false
 ZPOOLS=()
+
+DELETED_TAGS_THIS_RUN=()
 NEW_SNAPS=()
 
-show_help() { cat << EOF
-ZFS Snapper – TrueNAS-style Snapshot + Replication Manager
-Usage: ${0##*/} [OPTIONS] [zpool ...|--all]
-  --doit            Actually delete
-  --send-backups    Replicate to $BACKUP_POOL
-  --verbose, --list-new, --list-all, --quiet, --all, -h
+show_help() {
+    cat << 'EOF'
+ZFS Snapper – Fully independent snapshot creation + pruning
+
+Usage: zfs_snapper [OPTIONS] [zpool ...|--all]
+
+  --dosnap          Actually create new snapshots
+  --doprune         Actually delete old snapshots
+  --verbose         Extra debug output
+  --list-new        Show snapshots that would be/were created
+  --list-all        Show all snapper_* snapshots at end
+  --quiet|-q        Minimal output
+  --all             Process all pools
+  -h|--help         This help
+
+Examples:
+  zfs_snapper                  → full dry-run (show what would happen)
+  zfs_snapper --dosnap         → create new snapshots only
+  zfs_snapper --doprune        → prune old snapshots only
+  zfs_snapper --dosnap --doprune   → normal daily run (both)
 EOF
 }
 
+# ---------------------- Parse args ----------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -h|--help) show_help; exit 0 ;;
-        --doit) DRY_RUN=false; shift ;;
-        --verbose) VERBOSE=true; shift ;;
-        --list-new) LIST_NEW=true; shift ;;
-        --list-all) LIST_ALL=true; shift ;;
-        --quiet|-q) QUIET=true; shift ;;
-        --all) ZPOOLS=($(zpool list -H -o name)); shift ;;
-        -*) echo "Unknown option: $1" >&2; exit 1 ;;
-        *) ZPOOLS+=("$1"); shift ;;
+        -h|--help)      show_help; exit 0 ;;
+        --dosnap)       DO_SNAP=true; shift ;;
+        --doprune)      DO_PRUNE=true; shift ;;
+        --verbose)      VERBOSE=true; shift ;;
+        --list-new)     LIST_NEW=true; shift ;;
+        --list-all)     LIST_ALL=true; shift ;;
+        --quiet|-q)     QUIET=true; shift ;;
+        --all)          ZPOOLS=($(zpool list -H -o name)); shift ;;
+        -*)             echo "Unknown option: $1" >&2; exit 1 ;;
+        *)              ZPOOLS+=("$1"); shift ;;
     esac
 done
 [[ ${#ZPOOLS[@]} -eq 0 ]] && ZPOOLS=($(zpool list -H -o name))
@@ -42,54 +65,110 @@ timestamp=$(date +"%Y-%m-%d_%H:%M:%S")
 
 log() { [[ $QUIET == false ]] && echo "$@"; }
 verbose_log() { [[ $VERBOSE == true ]] && echo "[VERBOSE] $@"; }
-error() { echo "ERROR: $@" >&2; }
 
+# ---------------------- Snapshot Creation ----------------------
 create_snapshot() {
     local type="$1" zpool="$2"
     local snap_name="${SNAP_PREFIX}_${type}_${timestamp}"
     local full="${zpool}@${snap_name}"
 
     if zfs list -H "$full" >/dev/null 2>&1; then
-        verbose_log "Snapshot $full already exists"
+        verbose_log "Snapshot $full already exists → skipped"
         return 0
     fi
 
     log "Creating recursive $type snapshot @$snap_name"
-    zfs snapshot -r "$full" && NEW_SNAPS+=("$full") && log "Created @$snap_name"
+
+    if [[ $DO_SNAP == false ]]; then
+        log "  [DRY RUN] Would create: zfs snapshot -r $full"
+        NEW_SNAPS+=("$full")
+        return 0
+    fi
+
+    if zfs snapshot -r "$full"; then
+        NEW_SNAPS+=("$full")
+        log "  Created: $full"
+    else
+        echo "ERROR: Failed to create $full" >&2
+        return 1
+    fi
 }
 
-
+# ---------------------- Clean Pruning ----------------------
 prune_snapshots() {
-    local snap_type=$1 retention_days=$2 zpool=$3
-    local now_ts=$(( $(date +%s) - retention_days * 86400 ))
+    local snap_type="$1" retention_days="$2" zpool="$3"
+    local cutoff_ts=$(( $(date +%s) - retention_days * 86400 ))
+    local pattern="@${SNAP_PREFIX}_${snap_type}_"
 
-    # ONLY prune ROOT recursive snapshots (zpool@snapper_*)
-    zfs list -H -p -t snapshot -o name,creation "$zpool" 2>/dev/null \
-        | grep "@${SNAP_PREFIX}_${snap_type}_" \
-        | while IFS=$'\t' read -r snap ts; do
-            [[ $ts -lt $now_ts ]] || continue
-            log "Pruning $snap_type: $snap"
-            [[ $DRY_RUN == true ]] && {
-                log "  [DRY RUN] zfs destroy -r $snap"
+    [[ $QUIET == false ]] && echo "=== Pruning $snap_type snapshots older than $retention_days days on $zpool ==="
+
+    zfs list -H -p -o name,creation -t snapshot -r "$zpool" 2>/dev/null \
+        | grep "$pattern" \
+        | while IFS=$'\t' read -r snap_name creation_ts; do
+
+            [[ $creation_ts -lt $cutoff_ts ]] || continue
+
+            local age_days=$(( ($(date +%s) - creation_ts) / 86400 ))
+            local snap_date=$(date -d "@$creation_ts" +"%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+            local snap_tag="${snap_name#*@}"
+
+            if [[ " ${DELETED_TAGS_THIS_RUN[*]} " == *" $snap_tag "* ]]; then
+                [[ $QUIET == false ]] && log "  [ALREADY DELETED this run] $snap_name  (age: ${age_days}d, created: $snap_date)"
                 continue
-            }
-            zfs destroy -r "$snap" 2>/dev/null || true
+            fi
+
+            if [[ $DO_PRUNE == false ]]; then
+                log "  [DRY RUN] Would delete: $snap_name  (age: ${age_days}d, created: $snap_date)"
+            else
+                log "  Deleting: $snap_name  (age: ${age_days}d, created: $snap_date)"
+                if zfs destroy -r "$snap_name" >/dev/null 2>&1; then
+                    DELETED_TAGS_THIS_RUN+=("$snap_tag")
+                    log "    Deleted successfully"
+                else
+                    log "    Already gone"
+                fi
+            fi
         done
 }
 
+# ---------------------- List helpers ----------------------
 list_snapshots() {
-    [[ $LIST_NEW == true && ${#NEW_SNAPS[@]} -gt 0 ]] && { echo "=== New this run ==="; printf '%s\n' "${NEW_SNAPS[@]}"; echo; }
-    [[ $LIST_ALL == true ]] && { echo "=== All snapper snapshots ==="; zfs list -o name,creation -t snapshot | grep "@${SNAP_PREFIX}_" | sort; echo; }
+    [[ $LIST_NEW == true && ${#NEW_SNAPS[@]} -gt 0 ]] && {
+        echo "=== Snapshots created/would-be-created this run ==="
+        printf '%s\n' "${NEW_SNAPS[@]}"
+        echo
+    }
+    [[ $LIST_ALL == true ]] && {
+        echo "=== All current snapper snapshots ==="
+        zfs list -o name,creation -t snapshot | grep "@${SNAP_PREFIX}_" | sort
+        echo
+    }
 }
 
+# ---------------------- Main ----------------------
 main() {
+    if [[ $DO_SNAP == false && $DO_PRUNE == false ]]; then
+        [[ $QUIET == false ]] && echo "FULL DRY RUN – Showing what would happen"
+    else
+        [[ $QUIET == false ]] && echo "LIVE MODE: dosnap=$DO_SNAP  doprune=$DO_PRUNE"
+    fi
+    [[ $QUIET == false ]] && echo
+
     for zpool in "${ZPOOLS[@]}"; do
         [[ $QUIET == false ]] && echo "=== Processing zpool: $zpool ==="
-        [[ $(date +%w) == 0 ]] && { create_snapshot "weekly" "$zpool"; prune_snapshots "weekly" "$WEEKLY_RETENTION_DAYS" "$zpool"; }
-        create_snapshot "daily" "$zpool"
-        prune_snapshots "daily" "$DAILY_RETENTION_DAYS" "$zpool"
+
+        # Weekly on Sunday
+        if [[ $(date +%w) -eq 0 ]]; then
+            [[ $DO_SNAP == true ]] && create_snapshot "weekly" "$zpool"
+            [[ $DO_PRUNE == true ]] && prune_snapshots "weekly" "$WEEKLY_RETENTION_DAYS" "$zpool"
+        fi
+
+        [[ $DO_SNAP == true ]] && create_snapshot "daily" "$zpool"
+        [[ $DO_PRUNE == true ]] && prune_snapshots "daily"  "$DAILY_RETENTION_DAYS"  "$zpool"
+
         [[ $QUIET == false ]] && echo
     done
+
     list_snapshots
 }
 
