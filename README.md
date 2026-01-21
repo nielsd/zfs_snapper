@@ -33,7 +33,6 @@ This single bash script creates and maintains snapshots of single or all zfs zpo
 ## Configuration
 ```bash
 SNAP_PREFIX="snapper"                 # prefix for all snapshots
-BACKUP_POOL="backup"                  # destination pool
 DAILY_RETENTION_DAYS=5
 WEEKLY_RETENTION_DAYS=14
 ```
@@ -42,27 +41,38 @@ WEEKLY_RETENTION_DAYS=14
 
 ```bash
 # 1. Copy the script
-sudo cp zfs_snapper /root/sbin/zfs_snapper
-sudo chmod +x /root/sbin/zfs_snapper
+sudo cp zfs_snapper /usr/local/sbin/zfs_snapper
+sudo chmod +x /usr/local/sbin/zfs_snapper
 
 # 2. First full replication (you only do this once)
-sudo /root/sbin/zfs_snapper --all --doit --verbose
+sudo zfs_snapper --all --dosnap --verbose
 
-# 3. Set up cron (recommended)
-# Daily snapshots + pruning at 2 AM
-0 2 * * * /root/sbin/zfs_snapper --all --doit # --quiet
+# 3. Set up cron 
+# Daily snapshots of all pools + pruning at 2 AM
+0 2 * * * /usr/local/sbin/zfs_snapper --all --dosnap --doprune --quiet
 
-# Optional: weekly only on Sunday (extra safety)
-0 3 * * 0 /root/sbin/zfs_snapper --all --doit --list-all
+or if you want only pool "tank" snappped:
+
+# Daily snapshots (and show new snapshots)
+0 2 * * * /usr/local/sbin/zfs_snapper tank --dosnap --doprune --list-new
 ```
 
-## Option,Description
+## Usage / Options
 ```
---doit, Actually delete old snapshots (default = dry-run) send-backups,Replicate latest snapshot to backup/<pool>
---verbose, Show detailed progress
---quiet or -q, Silent mode – perfect for cron
---list-new, Show only snapshots created this run
---list-all, Show all snapper_* snapshots
---all, Process all pools or (default if none specified) tank rpool ...,Process only the listed pools
---help, Show help
+Usage: zfs_snapper [OPTIONS] [zpool ...|--all]
+
+  --dosnap          Actually create new snapshots
+  --doprune         Actually delete old snapshots
+  --verbose         Extra debug output
+  --list-new        Show snapshots that would be/were created
+  --list-all        Show all snapper_* snapshots at end
+  --quiet|-q        Minimal output
+  --all             Process all pools
+  -h|--help         This help
+
+Examples:
+  zfs_snapper                  → full dry-run (show what would happen)
+  zfs_snapper --dosnap         → create new snapshots only
+  zfs_snapper --doprune        → prune old snapshots only
+  zfs_snapper --dosnap --doprune   → normal daily run (both)
 ```
