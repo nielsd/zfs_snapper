@@ -23,6 +23,7 @@ This single bash script creates and maintains snapshots of single or all zfs zpo
 - Pure bash, no external tools required (except standard ZFS commands)
 - Dry-run mode, verbose mode, quiet mode → perfect for cron
 - Battle-tested on TrueNAS SCALE, Proxmox, Ubuntu, FreeBSD, and vanilla OpenZFS
+- additional script zfs_prune for pruning jobs only (i.e. on replicated zpools)
 
 ## Requirements
 
@@ -42,7 +43,9 @@ WEEKLY_RETENTION_DAYS=14
 ```bash
 # 1. Copy the script
 sudo cp zfs_snapper /usr/local/sbin/zfs_snapper
+sudo cp zfs_prune /usr/local/sbin/zfs_prune
 sudo chmod +x /usr/local/sbin/zfs_snapper
+sudo chmod +x /usr/local/sbin/zfs_prune
 
 # 2. First full replication (you only do this once)
 sudo zfs_snapper --all --dosnap --verbose
@@ -57,7 +60,7 @@ or if you want only pool "tank" snappped:
 0 2 * * * /usr/local/sbin/zfs_snapper tank --dosnap --doprune --list-new
 ```
 
-## Usage / Options
+## zfs_snapper Usage / Options
 ```
 Usage: zfs_snapper [OPTIONS] [zpool ...|--all]
 
@@ -75,4 +78,17 @@ Examples:
   zfs_snapper --dosnap         → create new snapshots only
   zfs_snapper --doprune        → prune old snapshots only
   zfs_snapper --dosnap --doprune   → normal daily run (both)
+```
+
+## zfs_prune Usage / Options
+```
+Usage: zfs_prune [OPTIONS] [zpool ...|--all]
+
+  --do-it   Actually delete snapshots (dry-run by default)
+  --all     Process all ZFS pools
+  -h|--help         This help
+
+Examples:
+  zfs_prune                    → full dry-run (show what would happen)
+  zfs_snapper --do-it          → prune old snapshots only
 ```
