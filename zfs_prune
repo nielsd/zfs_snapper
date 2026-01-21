@@ -1,0 +1,95 @@
+#!/bin/bash
+# zfs_prune - Recursively prune old snapper_ snapshots (dry-run by default)
+# Usage: zfs_prune [--do-it] [--all | pool1 pool2 ...]
+
+set -euo pipefail
+
+SNAP_PREFIX="snapper"
+DAILY_RETENTION_DAYS=7
+WEEKLY_RETENTION_DAYS=57
+
+DRY_RUN=true
+ZPOOLS=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --do-it|--doit) DRY_RUN=false; shift ;;
+        --all)          ZPOOLS=($(zpool list -H -o name)); shift ;;
+        -h|--help)
+            echo "Usage: ${0##*/} [--do-it] [--all | pool1 pool2 ...]"
+            echo "  --do-it   Actually delete snapshots (dry-run by default)"
+            echo "  --all     Process all ZFS pools"
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            ZPOOLS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Default: all pools if none specified
+if [[ ${#ZPOOLS[@]} -eq 0 ]]; then
+    ZPOOLS=($(zpool list -H -o name))
+fi
+
+# Helper: log only in dry-run or when something happens
+log() { echo "$@"; }
+
+prune_old_snapshots() {
+    local pool="$1"
+    local type="$2"        # "daily" or "weekly"
+    local retention_days="$3"
+
+    local cutoff_ts=$(( $(date +%s) - retention_days * 86400 ))
+    local pattern="@${SNAP_PREFIX}_${type}_"
+
+    echo "=== Pool: $pool | Pruning $type snapshots older than $retention_days days ==="
+
+    zfs list -H -p -o name,creation -t snapshot -r "$pool" 2>/dev/null \
+        | grep "$pattern" \
+        | while IFS=$'\t' read -r snap_name creation_ts; do
+            if [[ $creation_ts -lt $cutoff_ts ]]; then
+                local age_days=$(( ( $(date +%s) - creation_ts ) / 86400 ))
+                local snap_date=$(date -d "@$creation_ts" +"%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+
+                if [[ $DRY_RUN == true ]]; then
+                    log "  [DRY RUN] Would delete: $snap_name  (age: ${age_days}d, created: $snap_date)"
+                else
+                    log "  Deleting: $snap_name  (age: ${age_days}d, created: $snap_date)"
+                    # Try to destroy; if it fails because the snapshot is already gone, just log info.
+                    if ! zfs destroy -r "$snap_name" 2> >(grep -v "could not find any snapshots to destroy" >&2); then
+                    # If it genuinely failed for another reason, log that.
+                        log "    Info: $snap_name was already gone or could not be destroyed"
+                    fi
+                fi
+            fi
+        done
+}
+
+main() {
+    [[ $DRY_RUN == true ]] && log "DRY RUN MODE - No snapshots will be deleted"
+    [[ $DRY_RUN == false ]] && log "LIVE MODE - Snapshots will be deleted!"
+
+    for pool in "${ZPOOLS[@]}"; do
+        # Skip non-existent or offline pools
+        zpool list -H "$pool" &>/dev/null || continue
+
+        prune_old_snapshots "$pool" "daily"  "$DAILY_RETENTION_DAYS"
+        prune_old_snapshots "$pool" "weekly" "$WEEKLY_RETENTION_DAYS"
+        echo
+    done
+
+    if [[ $DRY_RUN == true ]]; then
+        echo "Dry-run complete. Use --do-it to actually delete snapshots."
+    else
+        echo "Pruning complete."
+    fi
+}
+
+main
